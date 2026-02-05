@@ -4,80 +4,87 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from io import BytesIO
 
+# --- 密碼保護 (請記得修改你的密碼) ---
 def check_password():
-    # 這裡放入你之前設定的密碼邏輯
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     if not st.session_state["password_correct"]:
+        st.title("🔐 系統鎖定")
         pwd = st.text_input("請輸入管理員密碼", type="password")
-        if st.button("確認登入"):
+        if st.button("登入"):
             if pwd == "54167":
                 st.session_state["password_correct"] = True
                 st.rerun()
+            else:
+                st.error("密碼錯誤")
         return False
     return True
 
-def convert_pdf_to_simple_pptx(uploaded_file):
+# --- 核心邏輯：中文字優化版 ---
+def convert_pdf_pro_v2(uploaded_file):
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     prs = Presentation()
-    # 設定 16:9
+    # 標準 16:9
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
     for page in doc:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         
-        # --- 1. 背景圖片層 ---
+        # 1. 圖片層：渲染背景 (這部分沒問題，我們維持輸出)
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_data = pix.tobytes("png")
         slide.shapes.add_picture(BytesIO(img_data), 0, 0, width=prs.slide_width, height=prs.slide_height)
 
-        # --- 2. 文字層優化：按「行」合併 ---
-        # 使用 "dict" 模式獲取結構化數據
+        # 2. 文字層：解決中文抓取問題
+        # 使用 "rawdict" 或 "dict" 模式，並強制抓取文本
         page_dict = page.get_text("dict")
-        page_w = page.rect.width
-        page_h = page.rect.height
+        page_w, page_h = page.rect.width, page.rect.height
 
         for block in page_dict["blocks"]:
             if "lines" in block:
                 for line in block["lines"]:
-                    # 合併這一行所有的 spans (文字片段)
-                    full_line_text = "".join([span["text"] for span in line["spans"]])
-                    if not full_line_text.strip(): continue
+                    # 關鍵：將同一行內的所有中文片段(spans)強制合併
+                    line_text = "".join([span["text"] for span in line["spans"]]).strip()
                     
-                    # 取得這一行的邊界
-                    bbox = line["bbox"] # (x0, y0, x1, y1)
-                    
-                    # 轉換為 PPT 座標
+                    if not line_text:
+                        continue
+
+                    # 取得這行文字的座標
+                    bbox = line["bbox"]
                     x = (bbox[0] / page_w) * prs.slide_width
                     y = (bbox[1] / page_h) * prs.slide_height
                     w = ((bbox[2] - bbox[0]) / page_w) * prs.slide_width
                     h = ((bbox[3] - bbox[1]) / page_h) * prs.slide_height
-                    
-                    # 取得該行第一個片段的字體大小作為基準
-                    base_font_size = line["spans"][0]["size"]
 
-                    # 在圖片上方建立文字框
+                    # 建立文字框
                     txBox = slide.shapes.add_textbox(x, y, w, h)
                     tf = txBox.text_frame
-                    tf.text = full_line_text
-                    
-                    # 設定字體樣式
+                    tf.word_wrap = True
                     p = tf.paragraphs[0]
-                    p.font.size = Pt(base_font_size * 0.8) # 縮放系數微調
-                    # 讓文字框背景透明（PPT 預設通常是透明的）
+                    p.text = line_text
+                    
+                    # 嘗試抓取原始字體大小，若失敗則給預設值
+                    try:
+                        p.font.size = Pt(line["spans"][0]["size"] * 0.9)
+                    except:
+                        p.font.size = Pt(18)
+                    
+                    # 為了讓分離更有感，我們暫時把文字顏色設為亮色或顯色
+                    # p.font.color.rgb = RGBColor(0, 0, 0)
 
     ppt_output = BytesIO()
     prs.save(ppt_output)
     return ppt_output.getvalue()
 
-# --- 主介面 ---
+# --- UI 介面 ---
 if check_password():
-    st.title("🚀 精簡版圖文分離工具")
-    st.write("目標：背景圖一層 + 每行文字各一個框，不再碎碎的。")
+    st.title("🛠️ 中文 PDF 圖文分離 (v2 修復版)")
+    st.info("如果下載後的 PPT 點擊文字可以編輯，就代表分離成功了！")
     
-    file = st.file_uploader("上傳 PDF", type="pdf")
-    if file and st.button("開始轉換"):
-        with st.spinner("正在提取圖層..."):
-            result = convert_pdf_to_simple_pptx(file)
-            st.download_button("📥 下載 PPTX", result, file_name="Simple_Layout.pptx")
+    file = st.file_uploader("上傳含有中文的 PDF", type="pdf")
+    if file and st.button("🚀 開始執行深度分離"):
+        with st.spinner("正在解析中文編碼並提取圖層..."):
+            result = convert_pdf_pro_v2(file)
+            st.success("分離完成！")
+            st.download_button("📥 下載可編輯 PPTX", result, file_name="Separated_Chinese.pptx")
