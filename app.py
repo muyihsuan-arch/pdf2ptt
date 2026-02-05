@@ -2,87 +2,106 @@ import streamlit as st
 import fitz  # PyMuPDF
 from pptx import Presentation
 from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
 from io import BytesIO
-from PIL import Image
-import os
 
-# --- 密碼保護 ---
+# --- 1. 密碼驗證邏輯 ---
 def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    if not st.session_state.authenticated:
-        pwd = st.sidebar.text_input("請輸入密碼以開啟 PRO 功能", type="password")
-        if pwd == "54167": # 請修改這裡
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            if pwd: st.sidebar.error("密碼錯誤")
-            st.title("🔒 存取受限")
-            st.info("請輸入正確密碼以解鎖 PDF 轉 PPT PRO 工具。")
-            return False
+    """回傳 True 代表驗證通過"""
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        st.title("🔒 歡迎使用 PDF 轉 PPT PRO 工具")
+        st.write("本工具僅供授權用戶使用，請先輸入密碼。")
+        
+        # 設定你的密碼
+        password = st.text_input("請輸入密碼", type="password")
+        if st.button("確認登入"):
+            if password == "你的密碼": # <--- 請在這裡修改你的密碼
+                st.session_state["password_correct"] = True
+                st.rerun()
+            else:
+                st.error("密碼錯誤，請重新輸入。")
+        return False
     return True
 
+# --- 2. 核心分離邏輯 ---
+def process_pdf_pro(uploaded_file):
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    prs = Presentation()
+    # 設置 PPT 為 16:9
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    for page in doc:
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        
+        # 渲染背景圖 (確保足夠清晰)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        img_data = pix.tobytes("png")
+        slide.shapes.add_picture(BytesIO(img_data), 0, 0, width=prs.slide_width, height=prs.slide_height)
+
+        # 提取文字並在 PPT 疊加可編輯框
+        blocks = page.get_text("blocks")
+        for b in blocks:
+            if b[6] == 0:  # block_type 為文字
+                text_content = b[4].strip()
+                if not text_content: continue
+                
+                # 計算座標比例
+                x = (b[0] / page.rect.width) * prs.slide_width
+                y = (b[1] / page.rect.height) * prs.slide_height
+                w = ((b[2] - b[0]) / page.rect.width) * prs.slide_width
+                h = ((b[3] - b[1]) / page.rect.height) * prs.slide_height
+
+                txBox = slide.shapes.add_textbox(x, y, w, h)
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                p = tf.paragraphs[0]
+                p.text = text_content
+                # 初始字體稍微設小一點，避免溢出，使用者可後續在 PPT 調整
+                p.font.size = Pt(16) 
+                p.alignment = PP_ALIGN.LEFT
+
+    ppt_out = BytesIO()
+    prs.save(ppt_out)
+    return ppt_out.getvalue()
+
+# --- 3. 主程式介面 ---
 if check_password():
-    st.title("🚀 PDF 轉 PPT 圖文分離版")
-    st.caption("自動提取 PDF 背景圖並將文字轉為可編輯圖層 (Powered by Gemini AI 邏輯)")
+    st.set_page_config(page_title="PDF PRO Converter", layout="wide")
+    
+    # 側邊欄增加登出功能
+    if st.sidebar.button("安全性登出"):
+        st.session_state["password_correct"] = False
+        st.rerun()
 
-    uploaded_file = st.file_uploader("上傳 PDF 檔案", type="pdf")
+    st.title("🎨 DeckEdit 模倣版：圖文分離 PRO")
+    st.markdown("---")
 
-    if uploaded_file:
-        # 讀取 PDF
-        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-        st.success(f"成功讀取: {uploaded_file.name} (共 {len(doc)} 頁)")
+    col1, col2 = st.columns([1, 1])
 
-        if st.button("開始轉換並匯出 PPT"):
-            prs = Presentation()
-            # 設定 16:9 寬螢幕
-            prs.slide_width = Inches(13.333)
-            prs.slide_height = Inches(7.5)
-
-            progress_bar = st.progress(0)
-            
-            for i, page in enumerate(doc):
-                # 1. 提取背景圖 (將整頁轉為圖片)
-                pix = page.get_displaylist().get_pixmap(matrix=fitz.Matrix(2, 2))
-                img_data = pix.tobytes("png")
-                
-                # 2. 建立 PPT 投影片
-                slide_layout = prs.slide_layouts[6] # 使用空白版型
-                slide = prs.slides.add_slide(slide_layout)
-                
-                # 3. 插入背景圖 (鋪滿全螢幕)
-                img_stream = BytesIO(img_data)
-                slide.shapes.add_picture(img_stream, 0, 0, width=prs.slide_width, height=prs.slide_height)
-
-                # 4. 提取文字層 (圖文分離的核心)
-                # 我們把文字疊在背景圖上方，設為半透明或與原位置重合，讓使用者可以點擊編輯
-                text_instances = page.get_text("dict")
-                for block in text_instances["blocks"]:
-                    if "lines" in block:
-                        for line in block["lines"]:
-                            for span in line["spans"]:
-                                # 計算座標比例 (PDF 到 PPT)
-                                x = (span["bbox"][0] / page.rect.width) * prs.slide_width
-                                y = (span["bbox"][1] / page.rect.height) * prs.slide_height
-                                w = (span["bbox"][2] - span["bbox"][0]) / page.rect.width * prs.slide_width
-                                h = (span["bbox"][3] - span["bbox"][1]) / page.rect.height * prs.slide_height
-                                
-                                # 加入文字框
-                                txBox = slide.shapes.add_textbox(x, y, w, h)
-                                tf = txBox.text_frame
-                                tf.text = span["text"]
-                                # 嘗試匹配字體大小
-                                tf.paragraphs[0].font.size = Pt(span["size"] * 0.8) 
-
-                progress_bar.progress((i + 1) / len(doc))
-
-            # 儲存結果
-            ppt_output = BytesIO()
-            prs.save(ppt_output)
-            
-            st.download_button(
-                label="📁 下載已分離圖層的 PPTX",
-                data=ppt_output.getvalue(),
-                file_name=f"Converted_{uploaded_file.name}.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            )
+    with col1:
+        st.subheader("第一步：上傳檔案")
+        file = st.file_uploader("選擇 NotebookLM 產出的 PDF", type="pdf")
+        
+    with col2:
+        st.subheader("第二步：執行轉換")
+        if file:
+            if st.button("🚀 開始深度分離圖層"):
+                with st.spinner("正在解析 PDF 文字座標並提取背景..."):
+                    try:
+                        result = process_pdf_pro(file)
+                        st.success("轉換完成！")
+                        st.download_button(
+                            label="📥 下載可編輯 PPTX",
+                            data=result,
+                            file_name=f"PRO_{file.name}.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            use_container_width=True
+                        )
+                    except Exception as e:
+                        st.error(f"處理失敗：{e}")
+        else:
+            st.info("請先上傳 PDF 檔案")
