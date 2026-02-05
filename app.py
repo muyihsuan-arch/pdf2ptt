@@ -2,106 +2,82 @@ import streamlit as st
 import fitz  # PyMuPDF
 from pptx import Presentation
 from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
 from io import BytesIO
 
-# --- 1. 密碼驗證邏輯 ---
 def check_password():
-    """回傳 True 代表驗證通過"""
+    # 這裡放入你之前設定的密碼邏輯
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
-
     if not st.session_state["password_correct"]:
-        st.title("🔒 歡迎使用 PDF 轉 PPT PRO 工具")
-        st.write("本工具僅供授權用戶使用，請先輸入密碼。")
-        
-        # 設定你的密碼
-        password = st.text_input("請輸入密碼", type="password")
+        pwd = st.text_input("請輸入管理員密碼", type="password")
         if st.button("確認登入"):
-            if password == "54167": # <--- 請在這裡修改你的密碼
+            if pwd == "54167":
                 st.session_state["password_correct"] = True
                 st.rerun()
-            else:
-                st.error("密碼錯誤，請重新輸入。")
         return False
     return True
 
-# --- 2. 核心分離邏輯 ---
-def process_pdf_pro(uploaded_file):
+def convert_pdf_to_simple_pptx(uploaded_file):
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     prs = Presentation()
-    # 設置 PPT 為 16:9
+    # 設定 16:9
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
     for page in doc:
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         
-        # 渲染背景圖 (確保足夠清晰)
+        # --- 1. 背景圖片層 ---
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_data = pix.tobytes("png")
         slide.shapes.add_picture(BytesIO(img_data), 0, 0, width=prs.slide_width, height=prs.slide_height)
 
-        # 提取文字並在 PPT 疊加可編輯框
-        blocks = page.get_text("blocks")
-        for b in blocks:
-            if b[6] == 0:  # block_type 為文字
-                text_content = b[4].strip()
-                if not text_content: continue
-                
-                # 計算座標比例
-                x = (b[0] / page.rect.width) * prs.slide_width
-                y = (b[1] / page.rect.height) * prs.slide_height
-                w = ((b[2] - b[0]) / page.rect.width) * prs.slide_width
-                h = ((b[3] - b[1]) / page.rect.height) * prs.slide_height
+        # --- 2. 文字層優化：按「行」合併 ---
+        # 使用 "dict" 模式獲取結構化數據
+        page_dict = page.get_text("dict")
+        page_w = page.rect.width
+        page_h = page.rect.height
 
-                txBox = slide.shapes.add_textbox(x, y, w, h)
-                tf = txBox.text_frame
-                tf.word_wrap = True
-                p = tf.paragraphs[0]
-                p.text = text_content
-                # 初始字體稍微設小一點，避免溢出，使用者可後續在 PPT 調整
-                p.font.size = Pt(16) 
-                p.alignment = PP_ALIGN.LEFT
+        for block in page_dict["blocks"]:
+            if "lines" in block:
+                for line in block["lines"]:
+                    # 合併這一行所有的 spans (文字片段)
+                    full_line_text = "".join([span["text"] for span in line["spans"]])
+                    if not full_line_text.strip(): continue
+                    
+                    # 取得這一行的邊界
+                    bbox = line["bbox"] # (x0, y0, x1, y1)
+                    
+                    # 轉換為 PPT 座標
+                    x = (bbox[0] / page_w) * prs.slide_width
+                    y = (bbox[1] / page_h) * prs.slide_height
+                    w = ((bbox[2] - bbox[0]) / page_w) * prs.slide_width
+                    h = ((bbox[3] - bbox[1]) / page_h) * prs.slide_height
+                    
+                    # 取得該行第一個片段的字體大小作為基準
+                    base_font_size = line["spans"][0]["size"]
 
-    ppt_out = BytesIO()
-    prs.save(ppt_out)
-    return ppt_out.getvalue()
+                    # 在圖片上方建立文字框
+                    txBox = slide.shapes.add_textbox(x, y, w, h)
+                    tf = txBox.text_frame
+                    tf.text = full_line_text
+                    
+                    # 設定字體樣式
+                    p = tf.paragraphs[0]
+                    p.font.size = Pt(base_font_size * 0.8) # 縮放系數微調
+                    # 讓文字框背景透明（PPT 預設通常是透明的）
 
-# --- 3. 主程式介面 ---
+    ppt_output = BytesIO()
+    prs.save(ppt_output)
+    return ppt_output.getvalue()
+
+# --- 主介面 ---
 if check_password():
-    st.set_page_config(page_title="PDF PRO Converter", layout="wide")
+    st.title("🚀 精簡版圖文分離工具")
+    st.write("目標：背景圖一層 + 每行文字各一個框，不再碎碎的。")
     
-    # 側邊欄增加登出功能
-    if st.sidebar.button("安全性登出"):
-        st.session_state["password_correct"] = False
-        st.rerun()
-
-    st.title("🎨 DeckEdit 模倣版：圖文分離 PRO")
-    st.markdown("---")
-
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        st.subheader("第一步：上傳檔案")
-        file = st.file_uploader("選擇 NotebookLM 產出的 PDF", type="pdf")
-        
-    with col2:
-        st.subheader("第二步：執行轉換")
-        if file:
-            if st.button("🚀 開始深度分離圖層"):
-                with st.spinner("正在解析 PDF 文字座標並提取背景..."):
-                    try:
-                        result = process_pdf_pro(file)
-                        st.success("轉換完成！")
-                        st.download_button(
-                            label="📥 下載可編輯 PPTX",
-                            data=result,
-                            file_name=f"PRO_{file.name}.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            use_container_width=True
-                        )
-                    except Exception as e:
-                        st.error(f"處理失敗：{e}")
-        else:
-            st.info("請先上傳 PDF 檔案")
+    file = st.file_uploader("上傳 PDF", type="pdf")
+    if file and st.button("開始轉換"):
+        with st.spinner("正在提取圖層..."):
+            result = convert_pdf_to_simple_pptx(file)
+            st.download_button("📥 下載 PPTX", result, file_name="Simple_Layout.pptx")
